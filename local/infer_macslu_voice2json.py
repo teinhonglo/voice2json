@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
-from build_macslu_grammar import normalize_for_voice2json
+from build_macslu_grammar import load_dictionary_words, normalize_for_voice2json
 
 
 def load_jsonl(path: Path) -> List[dict]:
@@ -73,8 +74,7 @@ def run_jsonl_command(cmd: List[str], input_lines: List[str]) -> List[dict]:
 
 def recognize_texts(
     texts: List[str],
-    run_voice2json: str,
-    profile: str,
+    voice2json_cmd: List[str],
     batch_size: int,
 ) -> List[dict]:
     results: List[dict] = [{} for _ in texts]
@@ -82,10 +82,7 @@ def recognize_texts(
 
     for index_chunk in chunked(valid_indices, batch_size):
         input_lines = [texts[i] for i in index_chunk]
-        cmd = [
-            run_voice2json,
-            "--profile",
-            profile,
+        cmd = voice2json_cmd + [
             "recognize-intent",
             "--text-input",
         ]
@@ -103,18 +100,14 @@ def recognize_texts(
 
 def transcribe_audio(
     audio_paths: List[str],
-    run_voice2json: str,
-    profile: str,
+    voice2json_cmd: List[str],
     asr_mode: str,
     batch_size: int,
 ) -> List[dict]:
     results: List[dict] = []
 
     for path_chunk in chunked(audio_paths, batch_size):
-        cmd = [
-            run_voice2json,
-            "--profile",
-            profile,
+        cmd = voice2json_cmd + [
             "transcribe-wav",
             "--stdin-files",
         ]
@@ -137,7 +130,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--input-jsonl", required=True)
     p.add_argument("--output-jsonl", required=True)
     p.add_argument("--intent-map", required=True)
-    p.add_argument("--run-voice2json", required=True)
+    p.add_argument("--run-voice2json", default="")
+    p.add_argument("--image", default="voice2json-zh:local")
+    p.add_argument("--mount", action="append", default=[])
     p.add_argument("--profile", default="zh-cn_pocketsphinx-cmu")
     p.add_argument(
         "--decode-mode",
@@ -150,7 +145,46 @@ def parse_args() -> argparse.Namespace:
         default="open",
     )
     p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument(
+        "--dictionary",
+        action="append",
+        required=True,
+        help=(
+            "Pronunciation dictionary to use as a known-word allowlist during "
+            "text normalization. May be passed multiple times."
+        ),
+    )
     return p.parse_args()
+
+
+def get_voice2json_cmd(args: argparse.Namespace) -> List[str]:
+    if args.run_voice2json:
+        return [args.run_voice2json, "--profile", args.profile]
+
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--init",
+        "-v",
+        f"{Path.home()}:{Path.home()}",
+        "-v",
+        "/dev/shm:/dev/shm",
+        "-w",
+        str(Path.cwd()),
+        "-e",
+        f"HOME={Path.home()}",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+    ]
+    for mount_path in args.mount:
+        path = Path(mount_path)
+        if path.is_dir():
+            cmd.extend(["-v", f"{path}:{path}"])
+
+    cmd.extend([args.image, "--profile", args.profile])
+    return cmd
 
 
 def main() -> None:
@@ -159,6 +193,13 @@ def main() -> None:
     output_path = Path(args.output_jsonl)
     intent_map = json.loads(Path(args.intent_map).read_text(encoding="utf-8"))
     rows = load_jsonl(input_path)
+    known_words = load_dictionary_words(Path(p) for p in args.dictionary)
+    if not known_words:
+        raise ValueError(
+            "No known words were loaded from --dictionary; cannot normalize "
+            "MAC-SLU inputs with the grammar's OOV filter."
+        )
+    voice2json_cmd = get_voice2json_cmd(args)
 
     if args.decode_mode == "audio":
         audio_paths = [str(row.get("audio", "")) for row in rows]
@@ -169,8 +210,7 @@ def main() -> None:
             )
         asr_outputs = transcribe_audio(
             audio_paths,
-            args.run_voice2json,
-            args.profile,
+            voice2json_cmd,
             args.asr_mode,
             args.batch_size,
         )
@@ -180,12 +220,15 @@ def main() -> None:
         pred_queries = [str(row.get("query", "")) for row in rows]
 
     normalized_queries = [
-        normalize_for_voice2json(query) for query in pred_queries
+        normalize_for_voice2json(
+            query,
+            known_words=known_words,
+        )
+        for query in pred_queries
     ]
     nlu_outputs = recognize_texts(
         normalized_queries,
-        args.run_voice2json,
-        args.profile,
+        voice2json_cmd,
         args.batch_size,
     )
 
@@ -206,7 +249,16 @@ def main() -> None:
                 else ""
             )
             map_entry = intent_map.get(intent_name, {})
-            pred_semantics = map_entry.get("semantics", [])
+            pred_semantics = map_entry.get("query_semantics", {}).get(norm_query, [])
+            matched_queries = map_entry.get("queries", [])
+            matched_train_query = ""
+            if matched_queries:
+                for matched_query in matched_queries:
+                    if matched_query.get("normalized_query", "") == norm_query:
+                        matched_train_query = matched_query.get("query", "")
+                        break
+                if not matched_train_query:
+                    matched_train_query = matched_queries[0].get("query", "")
             if map_entry:
                 matched += 1
 
@@ -224,7 +276,7 @@ def main() -> None:
                     else 0.0
                 ),
                 "normalized_pred_query": norm_query,
-                "matched_train_query": map_entry.get("query", ""),
+                "matched_train_query": matched_train_query,
                 "asr_likelihood": (
                     asr_result.get("likelihood", 0.0)
                     if isinstance(asr_result, dict)
