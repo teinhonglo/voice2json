@@ -99,6 +99,8 @@ fi
 profile_dir="${HOME}/.local/share/voice2json/${profile}"
 exp_root="${exp_root}/${decode_mode}_${asr_mode}"
 run_voice2json="${root_dir}/run_voice2json.sh"
+export VOICE2JSON_IMAGE="${image}"
+export VOICE2JSON_MOUNTS="${root_dir} ${qwen3_slu_root}"
 
 mkdir -p "${exp_root}"
 
@@ -149,7 +151,6 @@ v2j() {
 profile_dictionary_args=()
 collect_profile_dictionaries() {
     local dict_path
-
     profile_dictionary_args=()
     for dict_path in \
         "${profile_dir}/base_dictionary.txt" \
@@ -158,7 +159,7 @@ collect_profile_dictionaries() {
             profile_dictionary_args+=(--dictionary "${dict_path}")
         fi
     done
-
+    
     if [ "${#profile_dictionary_args[@]}" -eq 0 ]; then
         echo "[ERROR] no pronunciation dictionaries found in profile:" >&2
         echo "${profile_dir}" >&2
@@ -215,9 +216,9 @@ fi
 # ============================================================
 if [ "${stage}" -le 0 ] && [ "${stop_stage}" -ge 0 ]; then
     echo "Stage 0: Download profile and prepare MAC-SLU"
-
+    
     require_file "${prepare_py}" "prepare script not found"
-
+    
     if ! docker image inspect "${image}" >/dev/null 2>&1; then
         echo "[ERROR] Docker image not found: ${image}" >&2
         echo "Run Stage -1 first to build the patched image." >&2

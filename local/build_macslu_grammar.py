@@ -153,6 +153,16 @@ def parse_args() -> argparse.Namespace:
             "sentences."
         ),
     )
+    p.add_argument(
+        "--dictionary",
+        action="append",
+        required=True,
+        help=(
+            "Pronunciation dictionary to use as a known-word allowlist. May be "
+            "passed multiple times. OOV tokens are removed from normalized "
+            "sentences."
+        ),
+    )
     return p.parse_args()
 
 

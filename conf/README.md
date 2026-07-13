@@ -12,6 +12,7 @@ dictionaries as an allowlist. Tokens that are not present in those
 dictionaries are removed before writing sentence lines, which avoids forcing
 `train-profile` to guess OOV pronunciations with G2P.
 
+
 Only single-intent MAC-SLU rows are written to this grammar. Each section name
 is derived from the MAC-SLU domain/intent label, and contains all retained
 training sentences for that label. Per-query slot semantics are stored
