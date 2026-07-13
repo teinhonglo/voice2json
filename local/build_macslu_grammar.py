@@ -17,19 +17,47 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
-_ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9']+")
+_DICT_VARIANT_RE = re.compile(r"\(\d+\)$")
 
 
-def normalize_for_voice2json(text: str) -> str:
+def normalize_dictionary_word(word: str) -> str:
+    """Normalize a dictionary word for membership checks."""
+    word = _DICT_VARIANT_RE.sub("", word)
+    return unicodedata.normalize("NFKC", word).strip().lower()
+
+
+def load_dictionary_words(paths: Iterable[Path]) -> Set[str]:
+    """Load known words from pronunciation dictionary files."""
+    words: Set[str] = set()
+    for path in paths:
+        if not path.is_file():
+            continue
+
+        with path.open("r", encoding="utf-8") as dict_file:
+            for line in dict_file:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                word = normalize_dictionary_word(line.split(maxsplit=1)[0])
+                if word:
+                    words.add(word)
+
+    return words
+
+
+def normalize_for_voice2json(text: str, known_words: Set[str]) -> str:
     """Normalize and tokenize Chinese text for a plain JSGF sentence.
 
     Chinese characters are separated by spaces. Contiguous ASCII letters and
     digits are retained as one token. Grammar metacharacters and punctuation
-    are removed, preventing invalid OpenGrm/FST topology.
+    are removed, preventing invalid OpenGrm/FST topology. Tokens outside of
+    the pronunciation dictionaries are removed so profile training does not
+    have to guess OOV pronunciations with G2P.
     """
     text = unicodedata.normalize("NFKC", str(text or "")).strip().lower()
     tokens: List[str] = []
@@ -50,6 +78,10 @@ def normalize_for_voice2json(text: str) -> str:
             flush_ascii()
 
     flush_ascii()
+    tokens = [
+        token for token in tokens if normalize_dictionary_word(token) in known_words
+    ]
+
     return " ".join(tokens)
 
 
@@ -98,6 +130,16 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="0 means all unique training queries",
     )
+    p.add_argument(
+        "--dictionary",
+        action="append",
+        required=True,
+        help=(
+            "Pronunciation dictionary to use as a known-word allowlist. May be "
+            "passed multiple times. OOV tokens are removed from normalized "
+            "sentences."
+        ),
+    )
     return p.parse_args()
 
 
@@ -109,6 +151,12 @@ def main() -> None:
     stats_path = Path(args.stats_out)
 
     rows = load_jsonl(train_path)
+    known_words = load_dictionary_words(Path(p) for p in args.dictionary)
+    if not known_words:
+        raise ValueError(
+            "No known words were loaded from --dictionary; cannot build an "
+            "OOV-filtered MAC-SLU grammar."
+        )
 
     # normalized query -> semantic signature counts
     query_semantic_counts: Dict[str, Counter[str]] = defaultdict(Counter)
@@ -118,7 +166,10 @@ def main() -> None:
     skipped_empty = 0
     for row in rows:
         raw_query = str(row.get("query") or row.get("asr_text") or "")
-        norm_query = normalize_for_voice2json(raw_query)
+        norm_query = normalize_for_voice2json(
+            raw_query,
+            known_words=known_words,
+        )
         if not norm_query:
             skipped_empty += 1
             continue
@@ -175,6 +226,8 @@ def main() -> None:
         "grammar_entries": len(items),
         "queries_with_conflicting_labels": conflict_count,
         "skipped_empty_queries": skipped_empty,
+        "dictionary_files": args.dictionary,
+        "known_words": len(known_words),
         "grammar_file": str(grammar_path),
         "intent_map_file": str(map_path),
     }
