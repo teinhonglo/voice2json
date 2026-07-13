@@ -5,7 +5,7 @@
 # Therefore the default stage is 3 (inference), following the convention
 # used in Qwen3-SLU/run_macslu.sh.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 help_message=$(cat <<'EOF'
 Usage: ./run_macslu.sh [options]
@@ -19,6 +19,15 @@ Main options:
   --gpuid N                 # accepted for interface consistency; unused
   --qwen3-slu-root PATH
   --max-grammar-entries N   # 0 means all training queries
+
+Stages:
+  -1  Build patched Docker image
+   0  Download profile and prepare MAC-SLU JSONL
+   1  Build grammar and intent map
+   2  Train voice2json profile
+   3  Run inference
+   4  Evaluate predictions
+   5  Report resources
 EOF
 )
 
@@ -68,12 +77,14 @@ ram_repeat=50
 # -----------------------------
 # Stage control
 # -----------------------------
-# Stages 0-2 are one-time setup/training. Default starts at inference.
+# Stages -1 through 2 are setup/training. Default starts at inference.
 stage=3
 stop_stage=4
 
 . ./local/parse_options.sh
 . ./path.sh
+
+trap 'exit_code=$?; echo "[ERROR] ${BASH_SOURCE[0]} failed at line ${LINENO}: ${BASH_COMMAND}" >&2; exit "${exit_code}"' ERR
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 qwen3_slu_root="$(realpath "${qwen3_slu_root}")"
@@ -91,25 +102,58 @@ run_voice2json="${root_dir}/run_voice2json.sh"
 
 mkdir -p "${exp_root}"
 
+require_file() {
+    local path="$1"
+    local message="${2:-missing required file}"
+
+    if [ ! -s "${path}" ]; then
+        echo "[ERROR] ${message}: ${path}" >&2
+        exit 1
+    fi
+}
+
+require_dir() {
+    local path="$1"
+    local message="${2:-missing required directory}"
+
+    if [ ! -d "${path}" ]; then
+        echo "[ERROR] ${message}: ${path}" >&2
+        exit 1
+    fi
+}
+
 v2j() {
     VOICE2JSON_IMAGE="${image}" \
         "${run_voice2json}" \
         --profile "${profile}" "$@"
 }
 
-# ============================================================
-# Stage 0: One-time setup
-#   - Build patched Docker image
-#   - Download Mandarin profile
-#   - Download/prepare MAC-SLU JSONL
-# ============================================================
-if [ "${stage}" -le 0 ] && [ "${stop_stage}" -ge 0 ]; then
-    echo "Stage 0: Setup voice2json and prepare MAC-SLU"
+profile_dictionary_args=()
+collect_profile_dictionaries() {
+    local dict_path
 
-    if [ ! -f "${prepare_py}" ]; then
-        echo "[ERROR] prepare script not found: ${prepare_py}" >&2
+    profile_dictionary_args=()
+    for dict_path in \
+        "${profile_dir}/base_dictionary.txt" \
+        "${profile_dir}/custom_words.txt"; do
+        if [ -s "${dict_path}" ]; then
+            profile_dictionary_args+=(--dictionary "${dict_path}")
+        fi
+    done
+
+    if [ "${#profile_dictionary_args[@]}" -eq 0 ]; then
+        echo "[ERROR] no pronunciation dictionaries found in profile:" >&2
+        echo "${profile_dir}" >&2
+        echo "Run Stage 0 first so base_dictionary.txt is available." >&2
         exit 1
     fi
+}
+
+# ============================================================
+# Stage -1: Build patched Docker image
+# ============================================================
+if [ "${stage}" -le -1 ] && [ "${stop_stage}" -ge -1 ]; then
+    echo "Stage -1: Build patched voice2json Docker image"
 
     mkdir -p docker_patch
 
@@ -124,10 +168,7 @@ if [ "${stage}" -le 0 ] && [ "${stop_stage}" -ge 0 ]; then
             > "${patched_definition}"
     fi
 
-    if [ ! -s "${patched_definition}" ]; then
-        echo "[ERROR] failed to obtain ${profile}.yml" >&2
-        exit 1
-    fi
+    require_file "${patched_definition}" "failed to obtain ${profile}.yml"
 
     cat > docker_patch/Dockerfile <<DOCKER_EOF
 FROM synesthesiam/voice2json:latest
@@ -135,8 +176,24 @@ COPY ${profile}.yml /usr/lib/voice2json/etc/profiles/${profile}.yml
 DOCKER_EOF
 
     docker build -t "${image}" docker_patch
+fi
 
-    if [ ! -d "${profile_dir}/acoustic_model" ]; then
+# ============================================================
+# Stage 0: Download profile and prepare MAC-SLU JSONL
+# ============================================================
+if [ "${stage}" -le 0 ] && [ "${stop_stage}" -ge 0 ]; then
+    echo "Stage 0: Download profile and prepare MAC-SLU"
+
+    require_file "${prepare_py}" "prepare script not found"
+
+    if ! docker image inspect "${image}" >/dev/null 2>&1; then
+        echo "[ERROR] Docker image not found: ${image}" >&2
+        echo "Run Stage -1 first to build the patched image." >&2
+        exit 1
+    fi
+
+    if [ ! -d "${profile_dir}/acoustic_model" ] ||
+       [ ! -s "${profile_dir}/base_dictionary.txt" ]; then
         VOICE2JSON_IMAGE="${image}" \
             "${run_voice2json}" \
             --debug \
@@ -163,12 +220,20 @@ fi
 if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
     echo "Stage 1: Generate MAC-SLU grammar from training queries"
 
-    python local/build_macslu_grammar.py \
-        --train-jsonl "${json_root}/train.jsonl" \
-        --grammar-out "${grammar_file}" \
-        --intent-map-out "${intent_map_file}" \
-        --stats-out "${grammar_stats_file}" \
+    require_file "${json_root}/train.jsonl" "MAC-SLU train JSONL not found; run Stage 0 first"
+    require_dir "${profile_dir}" "profile directory not found; run Stage 0 first"
+    collect_profile_dictionaries
+
+    grammar_cmd=(
+        python local/build_macslu_grammar.py
+        --train-jsonl "${json_root}/train.jsonl"
+        --grammar-out "${grammar_file}"
+        --intent-map-out "${intent_map_file}"
+        --stats-out "${grammar_stats_file}"
         --max-entries "${max_grammar_entries}"
+    )
+    grammar_cmd+=("${profile_dictionary_args[@]}")
+    "${grammar_cmd[@]}"
 fi
 
 # ============================================================
@@ -177,19 +242,9 @@ fi
 if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
     echo "Stage 2: Load grammar and train voice2json profile"
 
-    for required in "${grammar_file}" "${intent_map_file}"; do
-        if [ ! -s "${required}" ]; then
-            echo "[ERROR] missing required file: ${required}" >&2
-            echo "Run Stage 1 first." >&2
-            exit 1
-        fi
-    done
-
-    if [ ! -d "${profile_dir}" ]; then
-        echo "[ERROR] profile not found: ${profile_dir}" >&2
-        echo "Run Stage 0 first." >&2
-        exit 1
-    fi
+    require_file "${grammar_file}" "grammar file missing; run Stage 1 first"
+    require_file "${intent_map_file}" "intent map missing; run Stage 1 first"
+    require_dir "${profile_dir}" "profile directory not found; run Stage 0 first"
 
     if [ -f "${profile_dir}/sentences.ini" ] &&
        [ ! -f "${profile_dir}/sentences.ini.original" ]; then
@@ -221,17 +276,26 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
         output_dir="${exp_root}/${test_set}"
         pred_file="${output_dir}/predictions.jsonl"
 
+        require_file "${test_jsonl}" "MAC-SLU ${test_set} JSONL not found; run Stage 0 first"
+        require_file "${intent_map_file}" "intent map missing; run Stage 1 first"
+        require_dir "${profile_dir}" "profile directory not found; run Stage 0 first"
+        collect_profile_dictionaries
+
         mkdir -p "${output_dir}"
 
-        python local/infer_macslu_voice2json.py \
-            --input-jsonl "${test_jsonl}" \
-            --output-jsonl "${pred_file}" \
-            --intent-map "${intent_map_file}" \
-            --run-voice2json "${run_voice2json}" \
-            --profile "${profile}" \
-            --decode-mode "${decode_mode}" \
-            --asr-mode "${asr_mode}" \
+        infer_cmd=(
+            python local/infer_macslu_voice2json.py
+            --input-jsonl "${test_jsonl}"
+            --output-jsonl "${pred_file}"
+            --intent-map "${intent_map_file}"
+            --run-voice2json "${run_voice2json}"
+            --profile "${profile}"
+            --decode-mode "${decode_mode}"
+            --asr-mode "${asr_mode}"
             --batch-size "${batch_size}"
+        )
+        infer_cmd+=("${profile_dictionary_args[@]}")
+        "${infer_cmd[@]}"
     done
 fi
 
@@ -241,15 +305,14 @@ fi
 if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
     echo "Stage 4: Evaluate MAC-SLU predictions"
 
-    if [ ! -f "${metrics_py}" ]; then
-        echo "[ERROR] metrics script not found: ${metrics_py}" >&2
-        exit 1
-    fi
+    require_file "${metrics_py}" "metrics script not found"
 
     for test_set in ${test_sets}; do
         pred_file="${exp_root}/${test_set}/predictions.jsonl"
         gt_file="${json_root}/${test_set}.jsonl"
         output_dir="${exp_root}/${test_set}"
+
+        require_file "${gt_file}" "MAC-SLU ${test_set} JSONL not found; run Stage 0 first"
 
         if [ ! -f "${pred_file}" ]; then
             echo "[WARNING] prediction file not found: ${pred_file}"
@@ -276,6 +339,8 @@ if [ "${stage}" -le 5 ] && [ "${stop_stage}" -ge 5 ]; then
     test_jsonl="${json_root}/test.jsonl"
     output_dir="${exp_root}/resource"
     mkdir -p "${output_dir}"
+
+    require_file "${test_jsonl}" "MAC-SLU test JSONL not found; run Stage 0 first"
 
     first_audio=$(
         python - "${test_jsonl}" <<'PY'

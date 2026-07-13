@@ -9,4 +9,4 @@ docker run --rm -i \
     -w "${HOME}" \
     -e "HOME=${HOME}" \
     --user "$(id -u):$(id -g)" \
-    voice2json-zh:local "$@"
+    "${VOICE2JSON_IMAGE:-voice2json-zh:local}" "$@"

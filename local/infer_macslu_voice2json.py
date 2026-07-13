@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
-from build_macslu_grammar import normalize_for_voice2json
+from build_macslu_grammar import load_dictionary_words, normalize_for_voice2json
 
 
 def load_jsonl(path: Path) -> List[dict]:
@@ -150,6 +150,15 @@ def parse_args() -> argparse.Namespace:
         default="open",
     )
     p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument(
+        "--dictionary",
+        action="append",
+        required=True,
+        help=(
+            "Pronunciation dictionary to use as a known-word allowlist during "
+            "text normalization. May be passed multiple times."
+        ),
+    )
     return p.parse_args()
 
 
@@ -159,6 +168,12 @@ def main() -> None:
     output_path = Path(args.output_jsonl)
     intent_map = json.loads(Path(args.intent_map).read_text(encoding="utf-8"))
     rows = load_jsonl(input_path)
+    known_words = load_dictionary_words(Path(p) for p in args.dictionary)
+    if not known_words:
+        raise ValueError(
+            "No known words were loaded from --dictionary; cannot normalize "
+            "MAC-SLU inputs with the grammar's OOV filter."
+        )
 
     if args.decode_mode == "audio":
         audio_paths = [str(row.get("audio", "")) for row in rows]
@@ -180,7 +195,11 @@ def main() -> None:
         pred_queries = [str(row.get("query", "")) for row in rows]
 
     normalized_queries = [
-        normalize_for_voice2json(query) for query in pred_queries
+        normalize_for_voice2json(
+            query,
+            known_words=known_words,
+        )
+        for query in pred_queries
     ]
     nlu_outputs = recognize_texts(
         normalized_queries,
