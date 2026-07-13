@@ -99,6 +99,8 @@ fi
 profile_dir="${HOME}/.local/share/voice2json/${profile}"
 exp_root="${exp_root}/${decode_mode}_${asr_mode}"
 run_voice2json="${root_dir}/run_voice2json.sh"
+export VOICE2JSON_IMAGE="${image}"
+export VOICE2JSON_MOUNTS="${root_dir} ${qwen3_slu_root}"
 
 mkdir -p "${exp_root}"
 
@@ -131,7 +133,6 @@ v2j() {
 profile_dictionary_args=()
 collect_profile_dictionaries() {
     local dict_path
-
     profile_dictionary_args=()
     for dict_path in \
         "${profile_dir}/base_dictionary.txt" \
@@ -140,13 +141,27 @@ collect_profile_dictionaries() {
             profile_dictionary_args+=(--dictionary "${dict_path}")
         fi
     done
-
+    
     if [ "${#profile_dictionary_args[@]}" -eq 0 ]; then
         echo "[ERROR] no pronunciation dictionaries found in profile:" >&2
         echo "${profile_dir}" >&2
         echo "Run Stage 0 first so base_dictionary.txt is available." >&2
         exit 1
     fi
+}
+
+show_metrics_files() {
+    local test_set
+    local metrics_file
+
+    for test_set in ${test_sets}; do
+        metrics_file="${exp_root}/${test_set}/metrics.txt"
+        if [ -s "${metrics_file}" ]; then
+            echo
+            echo "========== ${metrics_file} =========="
+            cat "${metrics_file}"
+        fi
+    done
 }
 
 # ============================================================
@@ -183,9 +198,9 @@ fi
 # ============================================================
 if [ "${stage}" -le 0 ] && [ "${stop_stage}" -ge 0 ]; then
     echo "Stage 0: Download profile and prepare MAC-SLU"
-
+    
     require_file "${prepare_py}" "prepare script not found"
-
+    
     if ! docker image inspect "${image}" >/dev/null 2>&1; then
         echo "[ERROR] Docker image not found: ${image}" >&2
         echo "Run Stage -1 first to build the patched image." >&2
@@ -343,22 +358,9 @@ if [ "${stage}" -le 5 ] && [ "${stop_stage}" -ge 5 ]; then
     require_file "${test_jsonl}" "MAC-SLU test JSONL not found; run Stage 0 first"
 
     first_audio=$(
-        python - "${test_jsonl}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-with path.open("r", encoding="utf-8") as f:
-    for line in f:
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        audio = row.get("audio", "")
-        if audio:
-            print(audio)
-            break
-PY
+        python local/model_resource_utils.py \
+            first-audio \
+            --jsonl "${test_jsonl}"
     )
 
     if [ -z "${first_audio}" ] || [ ! -f "${first_audio}" ]; then
@@ -385,6 +387,7 @@ PY
         --init \
         -v "${HOME}:${HOME}" \
         -v "${root_dir}:${root_dir}" \
+        -v "${qwen3_slu_root}:${qwen3_slu_root}:ro" \
         -v "/dev/shm:/dev/shm" \
         -w "${root_dir}" \
         -e "HOME=${HOME}" \
@@ -420,27 +423,9 @@ PY
     wait "${ram_pid}"
 
     peak_ram_bytes=$(
-        python - "${ram_stats_file}" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-scale = {
-    "B": 1,
-    "kB": 1000,
-    "MB": 1000**2,
-    "GB": 1000**3,
-    "KiB": 1024,
-    "MiB": 1024**2,
-    "GiB": 1024**3,
-}
-values = []
-for line in Path(sys.argv[1]).read_text().splitlines():
-    m = re.search(r"([0-9.]+)\s*([A-Za-z]+)", line)
-    if m and m.group(2) in scale:
-        values.append(int(float(m.group(1)) * scale[m.group(2)]))
-print(max(values) if values else 0)
-PY
+        python local/model_resource_utils.py \
+            peak-ram \
+            --stats-file "${ram_stats_file}"
     )
 
     python local/profile_resource_report.py \
@@ -452,4 +437,8 @@ PY
 
     trap - EXIT
     cleanup
+fi
+
+if [ "${stop_stage}" -ge 4 ]; then
+    show_metrics_files
 fi
