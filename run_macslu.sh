@@ -59,7 +59,7 @@ max_grammar_entries=0
 # Inference/evaluation config
 # -----------------------------
 decode_mode="audio"       # audio | oracle_text
-asr_mode="open"           # open is recommended for unseen MAC-SLU queries
+asr_mode="closed"
 test_sets="test"
 batch_size=256
 exp_root="exp/macslu/voice2json"
@@ -124,10 +124,28 @@ require_dir() {
     fi
 }
 
+macslu_docker_args() {
+    local args=(
+        --rm
+        -i
+        --init
+        -v "${HOME}:${HOME}"
+        -v "${root_dir}:${root_dir}"
+        -v "${qwen3_slu_root}:${qwen3_slu_root}:ro"
+        -v "/dev/shm:/dev/shm"
+        -w "${root_dir}"
+        -e "HOME=${HOME}"
+        --user "$(id -u):$(id -g)"
+    )
+    printf '%s\n' "${args[@]}"
+}
+
 v2j() {
-    VOICE2JSON_IMAGE="${image}" \
-        "${run_voice2json}" \
-        --profile "${profile}" "$@"
+    mapfile -t docker_args < <(macslu_docker_args)
+    docker run "${docker_args[@]}" \
+        "${image}" \
+        --profile "${profile}" \
+        "$@"
 }
 
 profile_dictionary_args=()
@@ -303,7 +321,9 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
             --input-jsonl "${test_jsonl}"
             --output-jsonl "${pred_file}"
             --intent-map "${intent_map_file}"
-            --run-voice2json "${run_voice2json}"
+            --image "${image}"
+            --mount "${root_dir}"
+            --mount "${qwen3_slu_root}"
             --profile "${profile}"
             --decode-mode "${decode_mode}"
             --asr-mode "${asr_mode}"

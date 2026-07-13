@@ -12,6 +12,8 @@ dictionaries as an allowlist. Tokens that are not present in those
 dictionaries are removed before writing sentence lines, which avoids forcing
 `train-profile` to guess OOV pronunciations with G2P.
 
-Each grammar section is a synthetic intent such as `MACSLU_0000123`.
-The complete single- or multi-intent MAC-SLU semantics are stored externally
-in `macslu_intent_map.json`.
+
+Only single-intent MAC-SLU rows are written to this grammar. Each section name
+is derived from the MAC-SLU domain/intent label, and contains all retained
+training sentences for that label. Per-query slot semantics are stored
+externally in `macslu_intent_map.json`.
