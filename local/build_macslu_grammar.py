@@ -450,6 +450,12 @@ def main() -> None:
         if not normalized_pattern:
             normalized_pattern = normalized_query
 
+        is_new_pattern = normalized_pattern not in section["patterns"]
+        if is_new_pattern and args.max_entries > 0 and grammar_entries >= args.max_entries:
+            # Skip before collecting slot values so a bounded debug grammar
+            # never contains slot sections that no retained pattern references.
+            continue
+
         for occurrence in occurrences:
             normalized_value = normalize_for_voice2json(
                 str(occurrence["value"]), known_words
@@ -473,9 +479,6 @@ def main() -> None:
             else:
                 ordered_add(global_nouns, normalized_value)
 
-        is_new_pattern = normalized_pattern not in section["patterns"]
-        if is_new_pattern and args.max_entries > 0 and grammar_entries >= args.max_entries:
-            continue
         if is_new_pattern:
             section["patterns"][normalized_pattern] = None
             grammar_entries += 1
