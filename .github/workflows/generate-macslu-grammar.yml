@@ -1,0 +1,94 @@
+name: Generate MAC-SLU grammar
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/align-macslu-pipeline-grammar
+    paths:
+      - .github/workflows/generate-macslu-grammar.yml
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install grammar dependencies
+        run: python -m pip install --disable-pip-version-check jieba pypinyin
+
+      - name: Download original MAC-SLU train labels
+        run: |
+          mkdir -p data/macslu/labels conf
+          curl -L --fail --retry 3 \
+            'https://huggingface.co/datasets/Gatsby1984/MAC_SLU/resolve/main/label/train_set.jsonl?download=true' \
+            -o data/macslu/labels/train_set.jsonl
+          test -s data/macslu/labels/train_set.jsonl
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('data/macslu/labels/train_set.jsonl')
+          count = 0
+          for line in path.open(encoding='utf-8'):
+              if line.strip():
+                  json.loads(line)
+                  count += 1
+          if count < 10000:
+              raise SystemExit(f'Unexpectedly small train set: {count}')
+          print(f'Validated {count} train rows')
+          PY
+
+      - name: Restore strict grammar generator
+        shell: bash
+        run: |
+          cat > /tmp/macslu_generator.b64 <<'EOF'
+          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
+          EOF
+          base64 -d /tmp/macslu_generator.b64 | gzip -d > /tmp/generate_macslu_grammar.py
+          python -m py_compile /tmp/generate_macslu_grammar.py
+
+      - name: Generate section-local voice2json grammar
+        run: |
+          python /tmp/generate_macslu_grammar.py \
+            --train-jsonl data/macslu/labels/train_set.jsonl \
+            --grammar-out conf/macslu_train_grammar.ini \
+            --metadata-out conf/macslu_grammar_metadata.json \
+            --stats-out conf/macslu_grammar_stats.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          stats = json.loads(Path('conf/macslu_grammar_stats.json').read_text(encoding='utf-8'))
+          if stats.get('undefined_slot_references') != 0:
+              raise SystemExit(stats)
+          if stats.get('grammar_patterns', 0) < 1000:
+              raise SystemExit(f"Unexpectedly small grammar: {stats}")
+          print(json.dumps(stats, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Upload generated grammar
+        uses: actions/upload-artifact@v4
+        with:
+          name: macslu-train-grammar
+          if-no-files-found: error
+          path: |
+            conf/macslu_train_grammar.ini
+            conf/macslu_grammar_metadata.json
+            conf/macslu_grammar_stats.json
+
+      - name: Commit generated files to branch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add conf/macslu_train_grammar.ini conf/macslu_grammar_metadata.json conf/macslu_grammar_stats.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Generate complete MAC-SLU grammar [skip ci]'
+            git push
+          fi
