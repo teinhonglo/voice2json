@@ -1,0 +1,39 @@
+name: Package MAC-SLU grammar
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/package-macslu-grammar.yml
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate generated files
+        run: |
+          test -s conf/macslu_train_grammar.ini
+          test -s conf/macslu_grammar_metadata.json
+          test -s conf/macslu_grammar_stats.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          stats = json.loads(Path('conf/macslu_grammar_stats.json').read_text(encoding='utf-8'))
+          assert stats['input_rows'] == 18000, stats
+          assert stats['undefined_slot_references'] == 0, stats
+          print(json.dumps(stats, ensure_ascii=False, indent=2))
+          PY
+      - name: Upload grammar package
+        uses: actions/upload-artifact@v4
+        with:
+          name: macslu-train-grammar-package
+          if-no-files-found: error
+          path: |
+            conf/macslu_train_grammar.ini
+            conf/macslu_grammar_metadata.json
+            conf/macslu_grammar_stats.json
