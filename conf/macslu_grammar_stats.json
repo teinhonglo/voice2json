@@ -1,9 +1,21 @@
 {
-  "input_rows": 17999,
-  "unique_normalized_queries": 17997,
-  "grammar_entries": 17997,
-  "queries_with_conflicting_labels": 2,
-  "skipped_empty_queries": 0,
+  "input_rows": 18000,
+  "no_intent_rows": 5305,
+  "single_intent_rows": 10018,
+  "single_frame_patterns": 16009,
+  "multi_intent_rows": 2676,
+  "combined_patterns": 2676,
+  "empty_query": 1,
+  "raw_sections": 221,
+  "grammar_patterns": 12538,
+  "grammar_sections": 221,
+  "explicit_rules": 1874,
+  "explicit_values": 11895,
+  "auto_rules": 257,
+  "auto_values": 3024,
+  "undefined_slot_references": 0,
+  "grammar_bytes": 1503492,
+  "undefined_examples": [],
   "grammar_file": "conf/macslu_train_grammar.ini",
-  "intent_map_file": "conf/macslu_intent_map.json"
+  "metadata_file": "conf/macslu_grammar_metadata.json"
 }
